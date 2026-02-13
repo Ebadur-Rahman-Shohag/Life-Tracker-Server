@@ -23,31 +23,30 @@ router.get('/', async (req, res) => {
   const includeArchived = req.query.includeArchived === 'true';
   const archivedOnly = req.query.archived === 'true';
   const parentId = req.query.parentId; // 'null' for top-level, or a project ID
-  const filter = { userId: req.user._id };
-  if (!includeArchived && !archivedOnly) filter.archived = false;
-  if (archivedOnly) filter.archived = true;
 
-  // Filter by parentId if specified
-  if (parentId === 'null' || parentId === '') {
-    filter.parentId = null;
-  } else if (parentId) {
-    filter.parentId = parentId;
-  }
-
-  const allProjects = await Project.find({ userId: req.user._id }).lean();
-  const projects = await Project.find(filter).sort({ createdAt: -1 }).lean();
-  const projectIds = projects.map((p) => p._id);
-  if (projectIds.length === 0) return res.json(projects);
-
-  // Get task stats for all projects (we need this for recursive calculation)
-  const allProjectIds = allProjects.map((p) => p._id);
-  const stats = await Task.aggregate([
-    { $match: { userId: req.user._id, projectId: { $in: allProjectIds } } },
-    { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
+  // Single query: fetch all user projects, then filter in memory
+  const [allProjects, stats] = await Promise.all([
+    Project.find({ userId: req.user._id }).sort({ createdAt: -1 }).lean(),
+    Task.aggregate([
+      { $match: { userId: req.user._id } },
+      { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
+    ]),
   ]);
 
+  // Apply filters in memory
+  let projects = allProjects;
+  if (!includeArchived && !archivedOnly) projects = projects.filter((p) => !p.archived);
+  if (archivedOnly) projects = projects.filter((p) => p.archived);
+  if (parentId === 'null' || parentId === '') {
+    projects = projects.filter((p) => !p.parentId);
+  } else if (parentId) {
+    projects = projects.filter((p) => p.parentId?.toString() === parentId);
+  }
+
+  if (projects.length === 0) return res.json(projects);
+
   const statsByProject = Object.fromEntries(
-    stats.map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
+    stats.filter((s) => s._id != null).map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
   );
 
   // Calculate stats including all descendants for each project
@@ -108,7 +107,7 @@ router.get('/:id', async (req, res) => {
   ]);
 
   const statsByProject = Object.fromEntries(
-    stats.map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
+    stats.filter((s) => s._id != null).map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
   );
 
   let totalTasks = 0;
