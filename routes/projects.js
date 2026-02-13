@@ -80,35 +80,37 @@ router.get('/', async (req, res) => {
 
 // Get single project with parent chain for breadcrumbs
 router.get('/:id', async (req, res) => {
-  const project = await Project.findOne({ _id: req.params.id, userId: req.user._id }).lean();
+  // Fetch project, sub-projects, and all projects in parallel
+  const [project, directSubProjects, allProjects, stats] = await Promise.all([
+    Project.findOne({ _id: req.params.id, userId: req.user._id }).lean(),
+    Project.find({ parentId: req.params.id, userId: req.user._id }).lean(),
+    Project.find({ userId: req.user._id }).lean(),
+    Task.aggregate([
+      { $match: { userId: req.user._id } },
+      { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
+    ]),
+  ]);
+
   if (!project) return res.status(404).json({ message: 'Project not found' });
 
   // Build parent chain (breadcrumb)
   const parentChain = [];
   let currentParentId = project.parentId;
   while (currentParentId) {
-    const parent = await Project.findOne({ _id: currentParentId, userId: req.user._id }).lean();
+    const parent = allProjects.find((p) => p._id.toString() === currentParentId.toString());
     if (!parent) break;
     parentChain.unshift({ _id: parent._id, name: parent.name });
     currentParentId = parent.parentId;
   }
 
-  // Get sub-projects
-  const subProjects = await Project.find({ parentId: project._id, userId: req.user._id }).lean();
-
-  // Get task stats
-  const allProjects = await Project.find({ userId: req.user._id }).lean();
-  const descendantIds = getAllDescendantIds(project._id, allProjects);
-  const allIds = [project._id, ...descendantIds];
-
-  const stats = await Task.aggregate([
-    { $match: { userId: req.user._id, projectId: { $in: allIds } } },
-    { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
-  ]);
-
+  // Create stats lookup map
   const statsByProject = Object.fromEntries(
     stats.filter((s) => s._id != null).map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
   );
+
+  // Calculate stats for main project
+  const descendantIds = getAllDescendantIds(project._id, allProjects);
+  const allIds = [project._id, ...descendantIds];
 
   let totalTasks = 0;
   let completedTasks = 0;
@@ -120,8 +122,8 @@ router.get('/:id', async (req, res) => {
     }
   }
 
-  // Add stats to sub-projects
-  const subProjectsWithStats = subProjects.map((sp) => {
+  // Add stats to sub-projects (only calculate for direct children)
+  const subProjectsWithStats = directSubProjects.map((sp) => {
     const spDescendantIds = getAllDescendantIds(sp._id, allProjects);
     const spAllIds = [sp._id, ...spDescendantIds];
     let spTotal = 0;
