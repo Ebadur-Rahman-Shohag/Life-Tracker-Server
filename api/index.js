@@ -106,8 +106,63 @@ async function connectToDatabase() {
   }
 }
 
+// Helper function to set CORS headers
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://life-tracker-frontend-seven.vercel.app',
+    ...(process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',') : [])
+  ];
+  
+  // Determine if origin should be allowed
+  let allowOrigin = null;
+  
+  if (!origin) {
+    // No origin header (e.g., Postman, curl) - allow but don't set credentials
+    allowOrigin = '*';
+  } else if (allowedOrigins.indexOf(origin) !== -1) {
+    // Origin is in explicit allowed list
+    allowOrigin = origin;
+  } else if (origin.includes('.vercel.app')) {
+    // Allow all Vercel preview deployments
+    allowOrigin = origin;
+  } else if (process.env.NODE_ENV !== 'production') {
+    // In development, allow all origins
+    allowOrigin = origin;
+  }
+  
+  // Always set CORS headers if we have an origin or are allowing all
+  if (allowOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+    if (allowOrigin !== '*') {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  } else {
+    // Fallback: allow the origin anyway (for debugging - remove in production if needed)
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+}
+
 // Vercel serverless function handler
 export default async function handler(req, res) {
+  // Handle OPTIONS preflight requests explicitly (required for Vercel serverless)
+  if (req.method === 'OPTIONS') {
+    setCorsHeaders(req, res);
+    return res.status(200).end();
+  }
+  
+  // For other requests, CORS middleware will handle headers
   // Connect to database
   await connectToDatabase();
   
