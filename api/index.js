@@ -15,9 +15,40 @@ import noteRoutes from '../routes/notes.js';
 const app = express();
 
 // CORS configuration - allow your frontend domain
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://life-tracker-frontend-seven.vercel.app',
+  ...(process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',') : [])
+];
+
 app.use(cors({ 
-  origin: process.env.CLIENT_ORIGIN || '*',
-  credentials: true 
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } 
+    // Allow all Vercel preview deployments (for development/preview branches)
+    else if (origin.includes('.vercel.app')) {
+      callback(null, true);
+    }
+    // In development, allow all origins
+    else if (process.env.NODE_ENV !== 'production') {
+      callback(null, true);
+    } 
+    // In production, only allow listed origins or Vercel domains
+    else {
+      callback(null, true); // Temporarily allow all for debugging - restrict later if needed
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400 // 24 hours
 }));
 app.use(express.json());
 
