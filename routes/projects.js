@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
 
   // Single query: fetch all user projects, then filter in memory
   const [allProjects, stats] = await Promise.all([
-    Project.find({ userId: req.user._id }).sort({ createdAt: -1 }).lean(),
+    Project.find({ userId: req.user._id }).sort({ order: 1, createdAt: -1 }).lean(),
     Task.aggregate([
       { $match: { userId: req.user._id } },
       { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
@@ -78,12 +78,35 @@ router.get('/', async (req, res) => {
   res.json(projectsWithStats);
 });
 
+// PUT /api/projects/reorder - Bulk reorder projects (MUST be before /:id)
+router.put('/reorder', async (req, res) => {
+  try {
+    const { projectIds } = req.body;
+    if (!Array.isArray(projectIds)) {
+      return res.status(400).json({ message: 'projectIds must be an array' });
+    }
+
+    const bulkOps = projectIds.map((id, index) => ({
+      updateOne: {
+        filter: { _id: id, userId: req.user._id },
+        update: { order: index },
+      },
+    }));
+
+    await Project.bulkWrite(bulkOps);
+    const projects = await Project.find({ userId: req.user._id }).sort({ order: 1 }).lean();
+    res.json(projects);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
 // Get single project with parent chain for breadcrumbs
 router.get('/:id', async (req, res) => {
   // Fetch project, sub-projects, and all projects in parallel
   const [project, directSubProjects, allProjects, stats] = await Promise.all([
     Project.findOne({ _id: req.params.id, userId: req.user._id }).lean(),
-    Project.find({ parentId: req.params.id, userId: req.user._id }).lean(),
+    Project.find({ parentId: req.params.id, userId: req.user._id }).sort({ order: 1, createdAt: -1 }).lean(),
     Project.find({ userId: req.user._id }).lean(),
     Task.aggregate([
       { $match: { userId: req.user._id } },
