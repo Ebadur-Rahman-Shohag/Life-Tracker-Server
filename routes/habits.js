@@ -18,11 +18,11 @@ router.use((req, res, next) => {
   next();
 });
 
-// Helper to normalize date to start of day
+// Helper to normalize date to start of day (UTC)
 function normalizeDate(date) {
   const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
+  // Use UTC methods to avoid timezone issues
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
 }
 
 // Helper to get all dates between two dates
