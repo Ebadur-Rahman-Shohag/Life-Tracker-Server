@@ -1,8 +1,9 @@
 import express from 'express';
-import { body, query, validationResult } from 'express-validator';
+import { body, query, param, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import Project from '../models/Project.js';
 import Task from '../models/Task.js';
+import Note from '../models/Note.js';
 
 const router = express.Router();
 router.use(protect);
@@ -231,10 +232,51 @@ router.delete('/:id', async (req, res) => {
   // Delete all tasks belonging to these projects
   await Task.deleteMany({ projectId: { $in: allIdsToDelete } });
 
+  // Remove project references from notes (don't delete notes, just disconnect them)
+  await Note.updateMany(
+    { projectIds: { $in: allIdsToDelete } },
+    { $pull: { projectIds: { $in: allIdsToDelete } } }
+  );
+
   // Delete all projects (parent and descendants)
   await Project.deleteMany({ _id: { $in: allIdsToDelete } });
 
   res.status(204).send();
+});
+
+// GET /api/projects/:id/notes - get notes connected to a project
+router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    // Get all descendant project IDs if includeSubProjects is true
+    const includeSubProjects = req.query.includeSubProjects === 'true';
+    let projectIds = [req.params.id];
+    
+    if (includeSubProjects) {
+      const allProjects = await Project.find({ userId: req.user._id }).lean();
+      const descendantIds = getAllDescendantIds(req.params.id, allProjects);
+      projectIds = [req.params.id, ...descendantIds];
+    }
+
+    const filter = {
+      userId: req.user._id,
+      projectIds: { $in: projectIds },
+    };
+
+    const archived = req.query.archived === 'true';
+    if (archived !== undefined) filter.archived = archived;
+    else filter.archived = false; // default: hide archived
+
+    const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    res.json(notes);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
 });
 
 export default router;

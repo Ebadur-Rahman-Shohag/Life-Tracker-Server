@@ -3,6 +3,7 @@ import { body, query, param, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import Note from '../models/Note.js';
 import NoteCategory from '../models/NoteCategory.js';
+import Project from '../models/Project.js';
 
 const router = express.Router();
 router.use(protect);
@@ -199,6 +200,7 @@ router.get(
     query('archived').optional().isIn(['true', 'false']),
     query('favoriteOnly').optional().isIn(['true', 'false']),
     query('search').optional().trim(),
+    query('projectId').optional().isMongoId(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -216,6 +218,16 @@ router.get(
 
       const favoriteOnly = parseBool(req.query.favoriteOnly);
       if (favoriteOnly === true) filter.isFavorite = true;
+
+      const projectId = req.query.projectId;
+      if (projectId) {
+        // Validate project belongs to user
+        const project = await Project.findOne({ _id: projectId, userId: req.user._id });
+        if (!project) {
+          return res.status(404).json({ message: 'Project not found' });
+        }
+        filter.projectIds = projectId;
+      }
 
       const search = req.query.search?.trim();
       if (search) {
@@ -304,12 +316,26 @@ router.post(
     body('tags.*').optional().isString().trim().isLength({ max: 30 }),
     body('color').optional().isString().trim().isLength({ max: 30 }),
     body('archived').optional().isBoolean(),
+    body('projectIds').optional().isArray(),
+    body('projectIds.*').optional().isMongoId(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
+      // Validate projectIds belong to user
+      let projectIds = [];
+      if (req.body.projectIds && Array.isArray(req.body.projectIds)) {
+        projectIds = req.body.projectIds.filter(Boolean);
+        if (projectIds.length > 0) {
+          const projects = await Project.find({ _id: { $in: projectIds }, userId: req.user._id });
+          if (projects.length !== projectIds.length) {
+            return res.status(400).json({ message: 'One or more projects not found or do not belong to you' });
+          }
+        }
+      }
+
       const noteData = {
         userId: req.user._id,
         title: req.body.title,
@@ -318,6 +344,7 @@ router.post(
         tags: Array.isArray(req.body.tags) ? req.body.tags.filter(Boolean) : [],
         color: req.body.color || '',
         archived: !!req.body.archived,
+        projectIds: projectIds,
       };
 
       // Support both legacy plain text and new block-based content
@@ -366,6 +393,8 @@ router.put(
     body('tags.*').optional().isString().trim().isLength({ max: 30 }),
     body('color').optional().isString().trim().isLength({ max: 30 }),
     body('archived').optional().isBoolean(),
+    body('projectIds').optional().isArray(),
+    body('projectIds.*').optional().isMongoId(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -374,6 +403,21 @@ router.put(
     try {
       const note = await Note.findOne({ _id: req.params.id, userId: req.user._id });
       if (!note) return res.status(404).json({ message: 'Note not found' });
+
+      // Validate projectIds belong to user if provided
+      if (req.body.projectIds !== undefined) {
+        let projectIds = [];
+        if (Array.isArray(req.body.projectIds)) {
+          projectIds = req.body.projectIds.filter(Boolean);
+          if (projectIds.length > 0) {
+            const projects = await Project.find({ _id: { $in: projectIds }, userId: req.user._id });
+            if (projects.length !== projectIds.length) {
+              return res.status(400).json({ message: 'One or more projects not found or do not belong to you' });
+            }
+          }
+        }
+        note.projectIds = projectIds;
+      }
 
       if (req.body.title !== undefined) note.title = req.body.title;
       if (req.body.category !== undefined) note.category = req.body.category?.trim() || 'Uncategorized';
@@ -446,6 +490,50 @@ router.put('/:id/archive', [param('id').isMongoId()], async (req, res) => {
     note.archived = !note.archived;
     await note.save();
     res.json({ _id: note._id, archived: note.archived });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// GET /api/notes/by-project/:projectId - get notes for a specific project
+router.get('/by-project/:projectId', [param('projectId').isMongoId()], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const project = await Project.findOne({ _id: req.params.projectId, userId: req.user._id });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    // Get all descendant project IDs if includeSubProjects is true
+    const includeSubProjects = req.query.includeSubProjects === 'true';
+    let projectIds = [req.params.projectId];
+    
+    if (includeSubProjects) {
+      const allProjects = await Project.find({ userId: req.user._id }).lean();
+      const getAllDescendantIds = (projectId, projects) => {
+        const descendants = [];
+        const children = projects.filter((p) => p.parentId?.toString() === projectId.toString());
+        for (const child of children) {
+          descendants.push(child._id);
+          descendants.push(...getAllDescendantIds(child._id, projects));
+        }
+        return descendants;
+      };
+      const descendantIds = getAllDescendantIds(req.params.projectId, allProjects);
+      projectIds = [req.params.projectId, ...descendantIds];
+    }
+
+    const filter = {
+      userId: req.user._id,
+      projectIds: { $in: projectIds },
+    };
+
+    const archived = parseBool(req.query.archived);
+    if (archived !== undefined) filter.archived = archived;
+    else filter.archived = false; // default: hide archived
+
+    const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    res.json(notes);
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }

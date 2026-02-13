@@ -26,12 +26,14 @@ const noteSchema = new mongoose.Schema(
     tags: [{ type: String, trim: true }],
     color: { type: String, default: '' },
     archived: { type: Boolean, default: false },
+    projectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
   },
   { timestamps: true }
 );
 
 noteSchema.index({ userId: 1, archived: 1, updatedAt: -1 });
 noteSchema.index({ userId: 1, category: 1, archived: 1, updatedAt: -1 });
+noteSchema.index({ userId: 1, projectIds: 1 });
 
 export default mongoose.model('Note', noteSchema);
 
