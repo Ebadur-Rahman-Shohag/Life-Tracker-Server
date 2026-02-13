@@ -33,6 +33,25 @@ app.use('/api/notes', noteRoutes);
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 
+// Root route handler
+app.get('/', (_, res) => {
+  res.json({
+    message: 'Life Tracker API',
+    status: 'running',
+    endpoints: {
+      auth: '/api/auth',
+      activities: '/api/activities',
+      projects: '/api/projects',
+      tasks: '/api/tasks',
+      habits: '/api/habits',
+      prayers: '/api/prayers',
+      budget: '/api/budget',
+      notes: '/api/notes',
+      health: '/api/health'
+    }
+  });
+});
+
 // MongoDB connection - reuse connection if exists
 let cachedDb = null;
 
