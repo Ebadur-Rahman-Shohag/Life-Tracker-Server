@@ -22,7 +22,8 @@ const allowedOrigins = [
   ...(process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',') : [])
 ];
 
-app.use(cors({ 
+// Enhanced CORS configuration
+const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
@@ -39,9 +40,9 @@ app.use(cors({
     else if (process.env.NODE_ENV !== 'production') {
       callback(null, true);
     } 
-    // In production, only allow listed origins or Vercel domains
+    // In production, allow all for now (can restrict later)
     else {
-      callback(null, true); // Temporarily allow all for debugging - restrict later if needed
+      callback(null, true);
     }
   },
   credentials: true,
@@ -49,8 +50,54 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 86400 // 24 hours
-}));
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle OPTIONS requests explicitly before other middleware
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
+
+// MongoDB connection - reuse connection if exists
+let cachedDb = null;
+
+async function connectToDatabase() {
+  if (cachedDb && mongoose.connection.readyState === 1) {
+    return cachedDb;
+  }
+
+  try {
+    const db = await mongoose.connect(
+      process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/life-tracker',
+      {
+        serverSelectionTimeoutMS: 5000,
+      }
+    );
+    cachedDb = db;
+    return db;
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    throw error;
+  }
+}
+
+// Database connection middleware - skip for OPTIONS requests
+app.use(async (req, res, next) => {
+  // Skip database connection for OPTIONS requests
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  
+  try {
+    await connectToDatabase();
+    next();
+  } catch (error) {
+    console.error('Database connection failed:', error);
+    res.status(500).json({ message: 'Database connection failed' });
+  }
+});
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -83,89 +130,5 @@ app.get('/', (_, res) => {
   });
 });
 
-// MongoDB connection - reuse connection if exists
-let cachedDb = null;
-
-async function connectToDatabase() {
-  if (cachedDb) {
-    return cachedDb;
-  }
-
-  try {
-    const db = await mongoose.connect(
-      process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/life-tracker',
-      {
-        serverSelectionTimeoutMS: 5000,
-      }
-    );
-    cachedDb = db;
-    return db;
-  } catch (error) {
-    console.error('MongoDB connection error:', error);
-    throw error;
-  }
-}
-
-// Helper function to set CORS headers
-function setCorsHeaders(req, res) {
-  const origin = req.headers.origin;
-  const allowedOrigins = [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'https://life-tracker-frontend-seven.vercel.app',
-    ...(process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',') : [])
-  ];
-  
-  // Determine if origin should be allowed
-  let allowOrigin = null;
-  
-  if (!origin) {
-    // No origin header (e.g., Postman, curl) - allow but don't set credentials
-    allowOrigin = '*';
-  } else if (allowedOrigins.indexOf(origin) !== -1) {
-    // Origin is in explicit allowed list
-    allowOrigin = origin;
-  } else if (origin.includes('.vercel.app')) {
-    // Allow all Vercel preview deployments
-    allowOrigin = origin;
-  } else if (process.env.NODE_ENV !== 'production') {
-    // In development, allow all origins
-    allowOrigin = origin;
-  }
-  
-  // Always set CORS headers if we have an origin or are allowing all
-  if (allowOrigin) {
-    res.setHeader('Access-Control-Allow-Origin', allowOrigin);
-    if (allowOrigin !== '*') {
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-    res.setHeader('Access-Control-Max-Age', '86400');
-  } else {
-    // Fallback: allow the origin anyway (for debugging - remove in production if needed)
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    if (origin) {
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-    res.setHeader('Access-Control-Max-Age', '86400');
-  }
-}
-
-// Vercel serverless function handler
-export default async function handler(req, res) {
-  // Handle OPTIONS preflight requests explicitly (required for Vercel serverless)
-  if (req.method === 'OPTIONS') {
-    setCorsHeaders(req, res);
-    return res.status(200).end();
-  }
-  
-  // For other requests, CORS middleware will handle headers
-  // Connect to database
-  await connectToDatabase();
-  
-  // Handle the request with Express
-  app(req, res);
-}
+// Export the Express app directly for Vercel
+export default app;
