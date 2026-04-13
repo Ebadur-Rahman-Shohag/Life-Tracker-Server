@@ -53,7 +53,7 @@ router.get('/', async (req, res) => {
   const projectsWithStats = projects.map((p) => {
     const descendantIds = getAllDescendantIds(p._id, allProjects);
     const allIds = [p._id, ...descendantIds];
-    
+
     let totalTasks = 0;
     let completedTasks = 0;
     for (const id of allIds) {
@@ -218,7 +218,7 @@ router.put(
       }
       const parentProject = await Project.findOne({ _id: req.body.parentId, userId: req.user._id });
       if (!parentProject) return res.status(404).json({ message: 'Parent project not found' });
-      
+
       // Prevent circular reference - check if new parent is a descendant
       const allProjects = await Project.find({ userId: req.user._id }).lean();
       const descendants = [];
@@ -280,7 +280,7 @@ router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
     // Get all descendant project IDs if includeSubProjects is true
     const includeSubProjects = req.query.includeSubProjects === 'true';
     let projectIds = [req.params.id];
-    
+
     if (includeSubProjects) {
       const allProjects = await Project.find({ userId: req.user._id }).lean();
       const descendantIds = getAllDescendantIds(req.params.id, allProjects);
