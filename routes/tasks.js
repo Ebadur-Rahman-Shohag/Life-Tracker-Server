@@ -1,5 +1,5 @@
 import express from 'express';
-import { body, query, validationResult } from 'express-validator';
+import { body, param, query, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import Task from '../models/Task.js';
 import Project from '../models/Project.js';
@@ -120,6 +120,7 @@ router.post(
 router.put(
   '/:id',
   [
+    param('id').isMongoId(),
     body('title').optional().trim().notEmpty(),
     body('completed').optional().isBoolean(),
     body('dueDate').optional().isISO8601(),
@@ -129,6 +130,8 @@ router.put(
     body('date').optional().isISO8601(),
   ],
   async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return res.status(404).json({ message: 'Task not found' });
     if (task.recurrenceRule && req.body.completed !== undefined && req.body.date) {
@@ -159,11 +162,18 @@ router.put(
   }
 );
 
-router.delete('/:id', async (req, res) => {
-  const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
-  if (!task) return res.status(404).json({ message: 'Task not found' });
-  await Task.findByIdAndDelete(req.params.id);
-  res.status(204).send();
-});
+router.delete(
+  '/:id',
+  [param('id').isMongoId()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+    await TaskCompletion.deleteMany({ userId: req.user._id, taskId: task._id });
+    await Task.findByIdAndDelete(req.params.id);
+    res.status(204).send();
+  }
+);
 
 export default router;

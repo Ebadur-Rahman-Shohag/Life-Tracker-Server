@@ -2,11 +2,14 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
 import User from '../models/User.js';
+import { getJwtSecret } from '../utils/jwtConfig.js';
+import { sendServerError } from '../utils/apiResponse.js';
+import { authRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
+router.use(authRateLimiter);
 
-const signToken = (userId) =>
-  jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback-secret', { expiresIn: '7d' });
+const signToken = (userId) => jwt.sign({ userId }, getJwtSecret(), { expiresIn: '7d' });
 
 router.post(
   '/register',
@@ -31,7 +34,7 @@ router.post(
         token,
       });
     } catch (err) {
-      res.status(500).json({ message: err.message || 'Registration failed' });
+      sendServerError(res, err, 'Registration failed');
     }
   }
 );
@@ -59,7 +62,7 @@ router.post(
         token,
       });
     } catch (err) {
-      res.status(500).json({ message: err.message || 'Login failed' });
+      sendServerError(res, err, 'Login failed');
     }
   }
 );
