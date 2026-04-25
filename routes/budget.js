@@ -3,6 +3,7 @@ import { body, query, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import BudgetCategory from '../models/BudgetCategory.js';
 import Transaction from '../models/Transaction.js';
+import { sendServerError } from '../utils/apiResponse.js';
 
 const router = express.Router();
 router.use(protect);
@@ -63,7 +64,7 @@ router.get('/categories', async (req, res) => {
     const categories = await BudgetCategory.find(filter).sort({ type: 1, name: 1 }).lean();
     res.json(categories);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -114,7 +115,7 @@ router.post(
           message: 'A category with this name and type already exists' 
         });
       }
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -145,7 +146,7 @@ router.put(
       await category.save();
       res.json(category);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -162,7 +163,7 @@ router.delete('/categories/:id', async (req, res) => {
 
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -214,7 +215,7 @@ router.get(
 
       res.json(transactions);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -262,7 +263,7 @@ router.post(
 
       res.status(201).json(populated);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -306,7 +307,7 @@ router.put(
 
       res.json(populated);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -320,7 +321,7 @@ router.delete('/transactions/:id', async (req, res) => {
     await Transaction.findByIdAndDelete(req.params.id);
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -422,7 +423,7 @@ router.get(
         byCategoryIncome: Object.values(byCategoryIncome),
       });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -471,7 +472,7 @@ router.get(
 
       res.json({ year, months });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
