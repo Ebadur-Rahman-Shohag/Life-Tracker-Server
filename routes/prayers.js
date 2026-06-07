@@ -246,28 +246,24 @@ router.get(
 
     try {
       const year = parseInt(req.query.year);
-      const months = [];
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
 
-      for (let month = 0; month < 12; month++) {
-        const startDate = new Date(year, month, 1);
-        const endDate = new Date(year, month + 1, 0);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+      const yearStart = new Date(year, 0, 1);
+      const yearEnd = new Date(year, 11, 31);
+      const effectiveYearEnd = yearEnd > today ? today : yearEnd;
 
-        const effectiveEndDate = endDate > today ? today : endDate;
-
-        if (startDate > today) {
-          months.push({ month: month + 1, successDays: 0, totalDays: 0, percentage: 0 });
-          continue;
-        }
+      const entriesByDate = new Map();
+      if (yearStart <= today) {
+        const effectiveEndQuery = new Date(effectiveYearEnd);
+        effectiveEndQuery.setHours(23, 59, 59, 999);
 
         const entries = await PrayerEntry.find({
           userId: req.user._id,
-          date: { $gte: startDate, $lte: effectiveEndDate },
+          date: { $gte: yearStart, $lte: effectiveEndQuery },
           prayed: true,
         }).lean();
 
-        const entriesByDate = new Map();
         entries.forEach((e) => {
           const dateKey = normalizeDate(e.date).toISOString();
           if (!entriesByDate.has(dateKey)) {
@@ -275,6 +271,18 @@ router.get(
           }
           entriesByDate.get(dateKey).add(e.prayerType);
         });
+      }
+
+      const months = [];
+      for (let month = 0; month < 12; month++) {
+        const startDate = new Date(year, month, 1);
+        const endDate = new Date(year, month + 1, 0);
+        const effectiveEndDate = endDate > today ? today : endDate;
+
+        if (startDate > today) {
+          months.push({ month: month + 1, successDays: 0, totalDays: 0, percentage: 0 });
+          continue;
+        }
 
         let successDays = 0;
         const dates = getDatesBetween(startDate, effectiveEndDate);
