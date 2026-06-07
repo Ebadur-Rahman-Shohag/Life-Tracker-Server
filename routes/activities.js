@@ -1,5 +1,5 @@
 import express from 'express';
-import { body, query, validationResult } from 'express-validator';
+import { body, param, query, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import Activity, { ALLOWED_CATEGORIES } from '../models/Activity.js';
 
@@ -74,6 +74,7 @@ router.post(
 router.put(
   '/:id',
   [
+    param('id').isMongoId(),
     body('date').optional().isISO8601(),
     body('category').optional().isIn(ALLOWED_CATEGORIES),
     body('value').optional().notEmpty(),
@@ -99,11 +100,17 @@ router.put(
   }
 );
 
-router.delete('/:id', async (req, res) => {
-  const activity = await Activity.findOne({ _id: req.params.id, userId: req.user._id });
-  if (!activity) return res.status(404).json({ message: 'Activity not found' });
-  await Activity.findByIdAndDelete(req.params.id);
-  res.status(204).send();
-});
+router.delete(
+  '/:id',
+  [param('id').isMongoId()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    const activity = await Activity.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!activity) return res.status(404).json({ message: 'Activity not found' });
+    await Activity.findByIdAndDelete(req.params.id);
+    res.status(204).send();
+  }
+);
 
 export default router;

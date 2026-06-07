@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { getJwtSecret } from '../utils/jwtConfig.js';
 
 export async function protect(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -10,7 +11,7 @@ export async function protect(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+    const decoded = jwt.verify(token, getJwtSecret());
     const user = await User.findById(decoded.userId).select('-password');
     if (!user) return res.status(401).json({ message: 'User not found' });
     req.user = user;

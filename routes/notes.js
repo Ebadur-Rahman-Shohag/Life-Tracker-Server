@@ -4,9 +4,26 @@ import { protect } from '../middleware/auth.js';
 import Note from '../models/Note.js';
 import NoteCategory from '../models/NoteCategory.js';
 import Project from '../models/Project.js';
+import { escapeRegexString } from '../utils/regex.js';
+import {
+  buildSearchText,
+  blocksPayloadByteLength,
+  isValidDocBlocks,
+  MAX_BLOCKS_JSON_BYTES,
+} from '../utils/noteText.js';
+import { sendServerError } from '../utils/apiResponse.js';
 
 const router = express.Router();
 router.use(protect);
+
+function blocksBodyValidator(field = 'blocks') {
+  return body(field).optional().custom((value) => {
+    if (value === undefined || value === null) return true;
+    if (!isValidDocBlocks(value)) throw new Error('blocks must be a TipTap document (type "doc")');
+    if (blocksPayloadByteLength(value) > MAX_BLOCKS_JSON_BYTES) throw new Error('blocks payload is too large');
+    return true;
+  });
+}
 
 // Prevent caching for GET requests
 router.use((req, res, next) => {
@@ -36,7 +53,7 @@ router.get('/categories', async (req, res) => {
     const categories = await NoteCategory.find(filter).sort({ order: 1, name: 1 }).lean();
     res.json(categories);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -57,7 +74,6 @@ router.post(
       const { name, icon, color, order } = req.body;
       const trimmedName = name.trim();
 
-      // Check if category with same name already exists for this user
       const existing = await NoteCategory.findOne({
         userId: req.user._id,
         name: trimmedName,
@@ -69,7 +85,6 @@ router.post(
         });
       }
 
-      // Get max order if not provided
       let categoryOrder = order;
       if (categoryOrder === undefined) {
         const maxOrderCategory = await NoteCategory.findOne({ userId: req.user._id }).sort({ order: -1 });
@@ -85,13 +100,50 @@ router.post(
       });
       res.status(201).json(category);
     } catch (err) {
-      // Handle unique index violation
       if (err.code === 11000) {
         return res.status(400).json({
           message: 'A category with this name already exists',
         });
       }
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
+    }
+  }
+);
+
+// PUT /api/notes/categories/reorder - Bulk reorder (must be before /categories/:id)
+router.put(
+  '/categories/reorder',
+  [body('categoryIds').isArray({ min: 1 }), body('categoryIds.*').isMongoId()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    try {
+      const { categoryIds } = req.body;
+      const userId = req.user._id;
+
+      const found = await NoteCategory.find({ _id: { $in: categoryIds }, userId }).lean();
+      if (found.length !== categoryIds.length) {
+        return res.status(400).json({ message: 'One or more categories are invalid' });
+      }
+
+      const unique = new Set(categoryIds.map((id) => id.toString()));
+      if (unique.size !== categoryIds.length) {
+        return res.status(400).json({ message: 'categoryIds must be unique' });
+      }
+
+      const bulkOps = categoryIds.map((id, index) => ({
+        updateOne: {
+          filter: { _id: id, userId: req.user._id },
+          update: { order: index },
+        },
+      }));
+
+      await NoteCategory.bulkWrite(bulkOps);
+      const categories = await NoteCategory.find({ userId: req.user._id }).sort({ order: 1, name: 1 }).lean();
+      res.json(categories);
+    } catch (err) {
+      sendServerError(res, err);
     }
   }
 );
@@ -117,7 +169,6 @@ router.put(
 
       if (req.body.name !== undefined) {
         const trimmedName = req.body.name.trim();
-        // Check if another category with same name exists
         const existing = await NoteCategory.findOne({
           userId: req.user._id,
           name: trimmedName,
@@ -143,33 +194,10 @@ router.put(
           message: 'A category with this name already exists',
         });
       }
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
-
-// PUT /api/notes/categories/reorder - Bulk reorder categories
-router.put('/categories/reorder', async (req, res) => {
-  try {
-    const { categoryIds } = req.body;
-    if (!Array.isArray(categoryIds)) {
-      return res.status(400).json({ message: 'categoryIds must be an array' });
-    }
-
-    const bulkOps = categoryIds.map((id, index) => ({
-      updateOne: {
-        filter: { _id: id, userId: req.user._id },
-        update: { order: index },
-      },
-    }));
-
-    await NoteCategory.bulkWrite(bulkOps);
-    const categories = await NoteCategory.find({ userId: req.user._id }).sort({ order: 1 }).lean();
-    res.json(categories);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
 
 // DELETE /api/notes/categories/:id - Delete category (soft delete)
 router.delete('/categories/:id', [param('id').isMongoId()], async (req, res) => {
@@ -180,13 +208,12 @@ router.delete('/categories/:id', [param('id').isMongoId()], async (req, res) => 
     const category = await NoteCategory.findOne({ _id: req.params.id, userId: req.user._id });
     if (!category) return res.status(404).json({ message: 'Category not found' });
 
-    // Soft delete by setting isActive to false
     category.isActive = false;
     await category.save();
 
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -211,7 +238,7 @@ router.get(
 
       const archived = parseBool(req.query.archived);
       if (archived !== undefined) filter.archived = archived;
-      else filter.archived = false; // default: hide archived
+      else filter.archived = false;
 
       const category = req.query.category?.trim();
       if (category && category !== 'All') filter.category = category;
@@ -221,7 +248,6 @@ router.get(
 
       const projectId = req.query.projectId;
       if (projectId) {
-        // Validate project belongs to user
         const project = await Project.findOne({ _id: projectId, userId: req.user._id });
         if (!project) {
           return res.status(404).json({ message: 'Project not found' });
@@ -231,18 +257,21 @@ router.get(
 
       const search = req.query.search?.trim();
       if (search) {
+        const safe = escapeRegexString(search);
+        const rx = new RegExp(safe, 'i');
         filter.$or = [
-          { title: { $regex: search, $options: 'i' } },
-          { content: { $regex: search, $options: 'i' } },
-          { category: { $regex: search, $options: 'i' } },
-          { tags: { $elemMatch: { $regex: search, $options: 'i' } } },
+          { title: rx },
+          { content: rx },
+          { searchText: rx },
+          { category: rx },
+          { tags: { $elemMatch: { $regex: safe, $options: 'i' } } },
         ];
       }
 
       const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
       res.json(notes);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -252,12 +281,10 @@ router.get('/stats', async (req, res) => {
   try {
     const userId = req.user._id;
 
-    // Get active categories from NoteCategory model
     const activeCategories = await NoteCategory.find({ userId, isActive: true })
       .sort({ order: 1, name: 1 })
       .lean();
 
-    // Get note counts by category
     const noteCountsByCategory = await Note.aggregate([
       { $match: { userId, archived: false } },
       { $group: { _id: '$category', count: { $sum: 1 } } },
@@ -265,7 +292,6 @@ router.get('/stats', async (req, res) => {
 
     const countMap = new Map(noteCountsByCategory.map((c) => [c._id || 'Uncategorized', c.count]));
 
-    // Build categories array with counts from managed categories
     const categoriesWithCounts = activeCategories.map((cat) => ({
       _id: cat._id,
       name: cat.name,
@@ -274,7 +300,6 @@ router.get('/stats', async (req, res) => {
       count: countMap.get(cat.name) || 0,
     }));
 
-    // Also include any categories from notes that aren't in managed categories
     const managedCategoryNames = new Set(activeCategories.map((c) => c.name));
     const unmanagedCategories = noteCountsByCategory
       .filter((c) => {
@@ -299,7 +324,7 @@ router.get('/stats', async (req, res) => {
       categories: [...categoriesWithCounts, ...unmanagedCategories],
     });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -308,8 +333,8 @@ router.post(
   '/',
   [
     body('title').trim().notEmpty().withMessage('Title is required').isLength({ max: 200 }),
-    body('content').optional().isString(), // Legacy: plain text
-    body('blocks').optional(), // New: block-based content (TipTap JSON object)
+    body('content').optional().isString(),
+    blocksBodyValidator('blocks'),
     body('category').optional().trim().isLength({ max: 60 }),
     body('isFavorite').optional().isBoolean(),
     body('tags').optional().isArray(),
@@ -324,7 +349,6 @@ router.post(
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      // Validate projectIds belong to user
       let projectIds = [];
       if (req.body.projectIds && Array.isArray(req.body.projectIds)) {
         projectIds = req.body.projectIds.filter(Boolean);
@@ -347,20 +371,20 @@ router.post(
         projectIds: projectIds,
       };
 
-      // Support both legacy plain text and new block-based content
-      // TipTap returns a JSON object: { type: 'doc', content: [...] }
-      if (req.body.blocks && typeof req.body.blocks === 'object' && req.body.blocks.type === 'doc') {
+      if (req.body.blocks && isValidDocBlocks(req.body.blocks)) {
         noteData.blocks = req.body.blocks;
-        noteData.content = ''; // Clear legacy content when using blocks
+        noteData.content = '';
+        noteData.searchText = buildSearchText(req.body.blocks, '');
       } else {
         noteData.content = req.body.content || '';
-        noteData.blocks = null; // No blocks for legacy content
+        noteData.blocks = null;
+        noteData.searchText = buildSearchText(null, noteData.content);
       }
 
       const note = await Note.create(noteData);
       res.status(201).json(note);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -375,7 +399,7 @@ router.get('/:id', [param('id').isMongoId()], async (req, res) => {
     if (!note) return res.status(404).json({ message: 'Note not found' });
     res.json(note);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -385,8 +409,8 @@ router.put(
   [
     param('id').isMongoId(),
     body('title').optional().trim().notEmpty().isLength({ max: 200 }),
-    body('content').optional().isString(), // Legacy: plain text
-    body('blocks').optional(), // New: block-based content (TipTap JSON object)
+    body('content').optional().isString(),
+    blocksBodyValidator('blocks'),
     body('category').optional().trim().isLength({ max: 60 }),
     body('isFavorite').optional().isBoolean(),
     body('tags').optional().isArray(),
@@ -404,7 +428,6 @@ router.put(
       const note = await Note.findOne({ _id: req.params.id, userId: req.user._id });
       if (!note) return res.status(404).json({ message: 'Note not found' });
 
-      // Validate projectIds belong to user if provided
       if (req.body.projectIds !== undefined) {
         let projectIds = [];
         if (Array.isArray(req.body.projectIds)) {
@@ -426,24 +449,23 @@ router.put(
       if (req.body.color !== undefined) note.color = req.body.color || '';
       if (req.body.archived !== undefined) note.archived = req.body.archived;
 
-      // Handle content: prefer blocks over legacy content
-      // TipTap returns a JSON object: { type: 'doc', content: [...] }
-      if (req.body.blocks && typeof req.body.blocks === 'object' && req.body.blocks.type === 'doc') {
+      if (req.body.blocks !== undefined && isValidDocBlocks(req.body.blocks)) {
+        if (blocksPayloadByteLength(req.body.blocks) > MAX_BLOCKS_JSON_BYTES) {
+          return res.status(400).json({ message: 'blocks payload is too large' });
+        }
         note.blocks = req.body.blocks;
-        // Clear legacy content when updating with blocks
         note.content = '';
+        note.searchText = buildSearchText(req.body.blocks, '');
       } else if (req.body.content !== undefined) {
         note.content = req.body.content;
-        // Clear blocks when updating with legacy content
-        if (req.body.content) {
-          note.blocks = null;
-        }
+        note.blocks = null;
+        note.searchText = buildSearchText(null, note.content);
       }
 
       await note.save();
       res.json(note);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -454,12 +476,11 @@ router.delete('/:id', [param('id').isMongoId()], async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const note = await Note.findOne({ _id: req.params.id, userId: req.user._id });
-    if (!note) return res.status(404).json({ message: 'Note not found' });
-    await Note.findByIdAndDelete(req.params.id);
+    const result = await Note.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+    if (!result) return res.status(404).json({ message: 'Note not found' });
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -475,7 +496,7 @@ router.put('/:id/favorite', [param('id').isMongoId()], async (req, res) => {
     await note.save();
     res.json({ _id: note._id, isFavorite: note.isFavorite });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -491,7 +512,7 @@ router.put('/:id/archive', [param('id').isMongoId()], async (req, res) => {
     await note.save();
     res.json({ _id: note._id, archived: note.archived });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -504,10 +525,9 @@ router.get('/by-project/:projectId', [param('projectId').isMongoId()], async (re
     const project = await Project.findOne({ _id: req.params.projectId, userId: req.user._id });
     if (!project) return res.status(404).json({ message: 'Project not found' });
 
-    // Get all descendant project IDs if includeSubProjects is true
     const includeSubProjects = req.query.includeSubProjects === 'true';
     let projectIds = [req.params.projectId];
-    
+
     if (includeSubProjects) {
       const allProjects = await Project.find({ userId: req.user._id }).lean();
       const getAllDescendantIds = (projectId, projects) => {
@@ -530,14 +550,13 @@ router.get('/by-project/:projectId', [param('projectId').isMongoId()], async (re
 
     const archived = parseBool(req.query.archived);
     if (archived !== undefined) filter.archived = archived;
-    else filter.archived = false; // default: hide archived
+    else filter.archived = false;
 
     const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
     res.json(notes);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
 export default router;
-

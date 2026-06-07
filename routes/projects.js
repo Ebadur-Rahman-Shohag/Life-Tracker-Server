@@ -4,8 +4,16 @@ import { protect } from '../middleware/auth.js';
 import Project from '../models/Project.js';
 import Task from '../models/Task.js';
 import Note from '../models/Note.js';
+import Reference from '../models/Reference.js';
+import { sendServerError } from '../utils/apiResponse.js';
 
 const router = express.Router();
+
+function parseQueryBool(v) {
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false') return false;
+  return undefined;
+}
 router.use(protect);
 
 // Helper: get all descendant project IDs (recursive)
@@ -53,7 +61,7 @@ router.get('/', async (req, res) => {
   const projectsWithStats = projects.map((p) => {
     const descendantIds = getAllDescendantIds(p._id, allProjects);
     const allIds = [p._id, ...descendantIds];
-    
+
     let totalTasks = 0;
     let completedTasks = 0;
     for (const id of allIds) {
@@ -79,27 +87,30 @@ router.get('/', async (req, res) => {
 });
 
 // PUT /api/projects/reorder - Bulk reorder projects (MUST be before /:id)
-router.put('/reorder', async (req, res) => {
-  try {
-    const { projectIds } = req.body;
-    if (!Array.isArray(projectIds)) {
-      return res.status(400).json({ message: 'projectIds must be an array' });
+router.put(
+  '/reorder',
+  [body('projectIds').isArray({ min: 1 }), body('projectIds.*').isMongoId()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const { projectIds } = req.body;
+
+      const bulkOps = projectIds.map((id, index) => ({
+        updateOne: {
+          filter: { _id: id, userId: req.user._id },
+          update: { order: index },
+        },
+      }));
+
+      await Project.bulkWrite(bulkOps);
+      const projects = await Project.find({ userId: req.user._id }).sort({ order: 1 }).lean();
+      res.json(projects);
+    } catch (err) {
+      sendServerError(res, err);
     }
-
-    const bulkOps = projectIds.map((id, index) => ({
-      updateOne: {
-        filter: { _id: id, userId: req.user._id },
-        update: { order: index },
-      },
-    }));
-
-    await Project.bulkWrite(bulkOps);
-    const projects = await Project.find({ userId: req.user._id }).sort({ order: 1 }).lean();
-    res.json(projects);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
   }
-});
+);
 
 // Get single project with parent chain for breadcrumbs
 router.get('/:id', async (req, res) => {
@@ -228,7 +239,7 @@ router.put(
       }
       const parentProject = await Project.findOne({ _id: req.body.parentId, userId: req.user._id });
       if (!parentProject) return res.status(404).json({ message: 'Parent project not found' });
-      
+
       // Prevent circular reference - check if new parent is a descendant
       const allProjects = await Project.find({ userId: req.user._id }).lean();
       const descendants = [];
@@ -272,6 +283,11 @@ router.delete('/:id', async (req, res) => {
     { $pull: { projectIds: { $in: allIdsToDelete } } }
   );
 
+  await Reference.updateMany(
+    { projectIds: { $in: allIdsToDelete } },
+    { $pull: { projectIds: { $in: allIdsToDelete } } }
+  );
+
   // Delete all projects (parent and descendants)
   await Project.deleteMany({ _id: { $in: allIdsToDelete } });
 
@@ -290,7 +306,7 @@ router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
     // Get all descendant project IDs if includeSubProjects is true
     const includeSubProjects = req.query.includeSubProjects === 'true';
     let projectIds = [req.params.id];
-    
+
     if (includeSubProjects) {
       const allProjects = await Project.find({ userId: req.user._id }).lean();
       const descendantIds = getAllDescendantIds(req.params.id, allProjects);
@@ -302,14 +318,44 @@ router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
       projectIds: { $in: projectIds },
     };
 
-    const archived = req.query.archived === 'true';
-    if (archived !== undefined) filter.archived = archived;
-    else filter.archived = false; // default: hide archived
+    const archivedQ = parseQueryBool(req.query.archived);
+    if (archivedQ === true) filter.archived = true;
+    else filter.archived = false;
 
     const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
     res.json(notes);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
+  }
+});
+
+// GET /api/projects/:id/references - references connected to a project
+router.get('/:id/references', [param('id').isMongoId()], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    const includeSubProjects = req.query.includeSubProjects === 'true';
+    let projectIds = [req.params.id];
+
+    if (includeSubProjects) {
+      const allProjects = await Project.find({ userId: req.user._id }).lean();
+      const descendantIds = getAllDescendantIds(req.params.id, allProjects);
+      projectIds = [req.params.id, ...descendantIds];
+    }
+
+    const filter = {
+      userId: req.user._id,
+      projectIds: { $in: projectIds },
+    };
+
+    const references = await Reference.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    res.json(references);
+  } catch (err) {
+    sendServerError(res, err);
   }
 });
 

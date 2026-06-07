@@ -2,6 +2,7 @@ import express from 'express';
 import { body, query, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import PrayerEntry, { PRAYER_TYPES } from '../models/PrayerEntry.js';
+import { sendServerError } from '../utils/apiResponse.js';
 
 const router = express.Router();
 router.use(protect);
@@ -57,7 +58,7 @@ router.get(
 
       res.json(entries);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -102,7 +103,7 @@ router.post(
         res.json({ prayed: true, prayerType, date: normalizedDate, entry });
       }
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -161,7 +162,7 @@ router.get(
 
       res.json({ days });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -231,7 +232,7 @@ router.get('/stats/streak', async (req, res) => {
 
     res.json({ currentStreak, longestStreak, milestones });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -297,7 +298,7 @@ router.get(
 
       res.json({ year, months });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );

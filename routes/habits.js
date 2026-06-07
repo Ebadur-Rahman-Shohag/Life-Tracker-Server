@@ -4,6 +4,7 @@ import { protect } from '../middleware/auth.js';
 import Habit from '../models/Habit.js';
 import HabitEntry from '../models/HabitEntry.js';
 import Streak from '../models/Streak.js';
+import { sendServerError } from '../utils/apiResponse.js';
 
 const router = express.Router();
 router.use(protect);
@@ -48,7 +49,7 @@ router.get('/', async (req, res) => {
     const habits = await Habit.find(filter).sort({ order: 1, createdAt: 1 }).lean();
     res.json(habits);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -82,7 +83,7 @@ router.post(
       });
       res.status(201).json(habit);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -106,7 +107,7 @@ router.put('/reorder', async (req, res) => {
     const habits = await Habit.find({ userId: req.user._id }).sort({ order: 1 }).lean();
     res.json(habits);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -132,7 +133,7 @@ router.put(
       await habit.save();
       res.json(habit);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -149,7 +150,7 @@ router.delete('/:id', async (req, res) => {
 
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -178,7 +179,7 @@ router.get(
 
       res.json(entries);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -224,7 +225,7 @@ router.post(
         res.json({ completed: true, habitId, date: normalizedDate, entry });
       }
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -299,7 +300,7 @@ router.get(
 
       res.json({ days, habits });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -377,7 +378,7 @@ router.get(
 
       res.json({ year, months });
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
@@ -459,7 +460,7 @@ router.get('/stats/streak', async (req, res) => {
       milestones,
     });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -546,7 +547,7 @@ router.get('/stats/habit-streaks', async (req, res) => {
 
     res.json(habitStreaks);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    sendServerError(res, err);
   }
 });
 
@@ -585,7 +586,7 @@ router.put(
 
       res.json(streak);
     } catch (err) {
-      res.status(500).json({ message: 'Server error', error: err.message });
+      sendServerError(res, err);
     }
   }
 );
