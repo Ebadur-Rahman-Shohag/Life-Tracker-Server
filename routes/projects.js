@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
 
   // Single query: fetch all user projects, then filter in memory
   const [allProjects, stats] = await Promise.all([
-    Project.find({ userId: req.user._id }).sort({ order: 1, createdAt: -1 }).lean(),
+    Project.find({ userId: req.user._id }).sort({ order: 1, createdAt: 1 }).lean(),
     Task.aggregate([
       { $match: { userId: req.user._id } },
       { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
@@ -106,7 +106,7 @@ router.get('/:id', async (req, res) => {
   // Fetch project, sub-projects, and all projects in parallel
   const [project, directSubProjects, allProjects, stats] = await Promise.all([
     Project.findOne({ _id: req.params.id, userId: req.user._id }).lean(),
-    Project.find({ parentId: req.params.id, userId: req.user._id }).sort({ order: 1, createdAt: -1 }).lean(),
+    Project.find({ parentId: req.params.id, userId: req.user._id }).sort({ order: 1, createdAt: 1 }).lean(),
     Project.find({ userId: req.user._id }).lean(),
     Task.aggregate([
       { $match: { userId: req.user._id } },
@@ -188,11 +188,21 @@ router.post(
       if (!parentProject) return res.status(404).json({ message: 'Parent project not found' });
     }
 
+    const orderFilter = { userId: req.user._id };
+    if (req.body.parentId) {
+      orderFilter.parentId = req.body.parentId;
+    } else {
+      orderFilter.parentId = null;
+    }
+    const maxOrderProject = await Project.findOne(orderFilter).sort({ order: -1 }).lean();
+    const nextOrder = maxOrderProject ? (maxOrderProject.order ?? 0) + 1 : 0;
+
     const project = await Project.create({
       userId: req.user._id,
       name: req.body.name,
       description: req.body.description || '',
       parentId: req.body.parentId || null,
+      order: nextOrder,
     });
     res.status(201).json(project);
   }

@@ -70,6 +70,40 @@ router.get(
   }
 );
 
+// PUT /api/tasks/reorder - Bulk reorder tasks (MUST be before /:id)
+router.put('/reorder', async (req, res) => {
+  try {
+    const { taskIds } = req.body;
+    if (!Array.isArray(taskIds)) {
+      return res.status(400).json({ message: 'taskIds must be an array' });
+    }
+    if (taskIds.length === 0) {
+      return res.json([]);
+    }
+
+    const tasks = await Task.find({ _id: { $in: taskIds }, userId: req.user._id }).lean();
+    if (tasks.length !== taskIds.length) {
+      return res.status(400).json({ message: 'One or more tasks not found' });
+    }
+
+    const bulkOps = taskIds.map((id, index) => ({
+      updateOne: {
+        filter: { _id: id, userId: req.user._id },
+        update: { order: index },
+      },
+    }));
+
+    await Task.bulkWrite(bulkOps);
+
+    const updated = await Task.find({ _id: { $in: taskIds }, userId: req.user._id })
+      .sort({ order: 1, createdAt: 1 })
+      .lean();
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
 router.post(
   '/',
   [
@@ -101,6 +135,22 @@ router.post(
       dayStart = new Date(date);
       dayStart.setHours(0, 0, 0, 0);
     }
+
+    const orderFilter = { userId: req.user._id };
+    if (projectId) {
+      orderFilter.projectId = projectId;
+    } else if (recurrenceRule) {
+      orderFilter.projectId = null;
+      orderFilter.recurrenceRule = { $exists: true, $ne: null };
+    } else if (dayStart) {
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+      orderFilter.projectId = null;
+      orderFilter.date = { $gte: dayStart, $lt: dayEnd };
+    }
+    const maxOrderTask = await Task.findOne(orderFilter).sort({ order: -1 }).lean();
+    const nextOrder = maxOrderTask ? (maxOrderTask.order ?? 0) + 1 : 0;
+
     const task = await Task.create({
       userId: req.user._id,
       title: title.trim(),
@@ -108,7 +158,7 @@ router.post(
       date: dayStart,
       projectId: projectId || undefined,
       dueDate: dueDate ? new Date(dueDate) : undefined,
-      order: order != null ? Number(order) : 0,
+      order: order != null ? Number(order) : nextOrder,
       priority: priority || 'medium',
       notes: notes || '',
       recurrenceRule: recurrenceRule || undefined,
