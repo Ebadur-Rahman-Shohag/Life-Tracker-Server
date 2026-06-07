@@ -16,6 +16,7 @@ import prayerRoutes from './routes/prayers.js';
 import budgetRoutes from './routes/budget.js';
 import noteRoutes from './routes/notes.js';
 import referenceRoutes from './routes/references.js';
+import dashboardRoutes from './routes/dashboard.js';
 import { backfillNoteSearchText } from './jobs/backfillNoteSearchText.js';
 
 assertProductionJwtConfig();
@@ -44,6 +45,7 @@ app.use('/api/prayers', prayerRoutes);
 app.use('/api/budget', budgetRoutes);
 app.use('/api/notes', noteRoutes);
 app.use('/api/references', referenceRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

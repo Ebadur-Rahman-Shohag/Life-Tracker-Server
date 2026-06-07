@@ -121,6 +121,9 @@ router.put(
     body('isActive').optional().isBoolean(),
   ],
   async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
     try {
       const habit = await Habit.findOne({ _id: req.params.id, userId: req.user._id });
       if (!habit) return res.status(404).json({ message: 'Habit not found' });

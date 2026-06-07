@@ -6,6 +6,15 @@ import Task from '../models/Task.js';
 import Note from '../models/Note.js';
 import Reference from '../models/Reference.js';
 import { sendServerError } from '../utils/apiResponse.js';
+import {
+  attachRollupStats,
+  buildChildrenMap,
+  buildParentChain,
+  buildProjectsById,
+  buildRollupStatsMap,
+  fetchTaskStatsByProject,
+  getDescendantIds,
+} from '../utils/projectTree.js';
 
 const router = express.Router();
 
@@ -16,32 +25,7 @@ function parseQueryBool(v) {
 }
 router.use(protect);
 
-// Helper: get all descendant project IDs (recursive)
-function getAllDescendantIds(projectId, projects) {
-  const descendants = [];
-  const children = projects.filter((p) => p.parentId?.toString() === projectId.toString());
-  for (const child of children) {
-    descendants.push(child._id);
-    descendants.push(...getAllDescendantIds(child._id, projects));
-  }
-  return descendants;
-}
-
-router.get('/', async (req, res) => {
-  const includeArchived = req.query.includeArchived === 'true';
-  const archivedOnly = req.query.archived === 'true';
-  const parentId = req.query.parentId; // 'null' for top-level, or a project ID
-
-  // Single query: fetch all user projects, then filter in memory
-  const [allProjects, stats] = await Promise.all([
-    Project.find({ userId: req.user._id }).sort({ order: 1, createdAt: 1 }).lean(),
-    Task.aggregate([
-      { $match: { userId: req.user._id } },
-      { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
-    ]),
-  ]);
-
-  // Apply filters in memory
+function filterProjectsForList(allProjects, { includeArchived, archivedOnly, parentId }) {
   let projects = allProjects;
   if (!includeArchived && !archivedOnly) projects = projects.filter((p) => !p.archived);
   if (archivedOnly) projects = projects.filter((p) => p.archived);
@@ -50,43 +34,30 @@ router.get('/', async (req, res) => {
   } else if (parentId) {
     projects = projects.filter((p) => p.parentId?.toString() === parentId);
   }
+  return projects;
+}
 
-  if (projects.length === 0) return res.json(projects);
+router.get('/', async (req, res) => {
+  try {
+    const includeArchived = req.query.includeArchived === 'true';
+    const archivedOnly = req.query.archived === 'true';
+    const parentId = req.query.parentId;
 
-  const statsByProject = Object.fromEntries(
-    stats.filter((s) => s._id != null).map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
-  );
+    const [allProjects, statsByProject] = await Promise.all([
+      Project.find({ userId: req.user._id }).sort({ order: 1, createdAt: 1 }).lean(),
+      fetchTaskStatsByProject(req.user._id),
+    ]);
 
-  // Calculate stats including all descendants for each project
-  const projectsWithStats = projects.map((p) => {
-    const descendantIds = getAllDescendantIds(p._id, allProjects);
-    const allIds = [p._id, ...descendantIds];
+    const projects = filterProjectsForList(allProjects, { includeArchived, archivedOnly, parentId });
+    if (projects.length === 0) return res.json([]);
 
-    let totalTasks = 0;
-    let completedTasks = 0;
-    for (const id of allIds) {
-      const s = statsByProject[id.toString()];
-      if (s) {
-        totalTasks += s.totalTasks;
-        completedTasks += s.completedTasks;
-      }
-    }
-
-    // Count direct sub-projects
-    const subProjectCount = allProjects.filter((sp) => sp.parentId?.toString() === p._id.toString()).length;
-
-    return {
-      ...p,
-      totalTasks,
-      completedTasks,
-      subProjectCount,
-    };
-  });
-
-  res.json(projectsWithStats);
+    const rollupMap = buildRollupStatsMap(allProjects, statsByProject);
+    res.json(attachRollupStats(projects, rollupMap));
+  } catch (err) {
+    sendServerError(res, err);
+  }
 });
 
-// PUT /api/projects/reorder - Bulk reorder projects (MUST be before /:id)
 router.put(
   '/reorder',
   [body('projectIds').isArray({ min: 1 }), body('projectIds.*').isMongoId()],
@@ -96,6 +67,16 @@ router.put(
     try {
       const { projectIds } = req.body;
 
+      const found = await Project.find({ _id: { $in: projectIds }, userId: req.user._id }).lean();
+      if (found.length !== projectIds.length) {
+        return res.status(400).json({ message: 'One or more projects not found' });
+      }
+
+      const parentKeys = new Set(found.map((p) => p.parentId?.toString() || '__root__'));
+      if (parentKeys.size > 1) {
+        return res.status(400).json({ message: 'All projects must share the same parent for reorder' });
+      }
+
       const bulkOps = projectIds.map((id, index) => ({
         updateOne: {
           filter: { _id: id, userId: req.user._id },
@@ -104,82 +85,52 @@ router.put(
       }));
 
       await Project.bulkWrite(bulkOps);
-      const projects = await Project.find({ userId: req.user._id }).sort({ order: 1 }).lean();
-      res.json(projects);
+      res.json({ ok: true });
     } catch (err) {
       sendServerError(res, err);
     }
   }
 );
 
-// Get single project with parent chain for breadcrumbs
 router.get('/:id', async (req, res) => {
-  // Fetch project, sub-projects, and all projects in parallel
-  const [project, directSubProjects, allProjects, stats] = await Promise.all([
-    Project.findOne({ _id: req.params.id, userId: req.user._id }).lean(),
-    Project.find({ parentId: req.params.id, userId: req.user._id }).sort({ order: 1, createdAt: 1 }).lean(),
-    Project.find({ userId: req.user._id }).lean(),
-    Task.aggregate([
-      { $match: { userId: req.user._id } },
-      { $group: { _id: '$projectId', total: { $sum: 1 }, completed: { $sum: { $cond: ['$completed', 1, 0] } } } },
-    ]),
-  ]);
+  try {
+    const [project, directSubProjects, tasks, allProjects, statsByProject] = await Promise.all([
+      Project.findOne({ _id: req.params.id, userId: req.user._id }).lean(),
+      Project.find({ parentId: req.params.id, userId: req.user._id })
+        .sort({ order: 1, createdAt: 1 })
+        .lean(),
+      Task.find({ userId: req.user._id, projectId: req.params.id })
+        .sort({ order: 1, createdAt: 1 })
+        .lean(),
+      Project.find({ userId: req.user._id }).lean(),
+      fetchTaskStatsByProject(req.user._id),
+    ]);
 
-  if (!project) return res.status(404).json({ message: 'Project not found' });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
 
-  // Build parent chain (breadcrumb)
-  const parentChain = [];
-  let currentParentId = project.parentId;
-  while (currentParentId) {
-    const parent = allProjects.find((p) => p._id.toString() === currentParentId.toString());
-    if (!parent) break;
-    parentChain.unshift({ _id: parent._id, name: parent.name });
-    currentParentId = parent.parentId;
+    const projectsById = buildProjectsById(allProjects);
+    const parentChain = buildParentChain(project, projectsById);
+    const rollupMap = buildRollupStatsMap(allProjects, statsByProject);
+    const projectStats = rollupMap.get(project._id.toString()) || {
+      totalTasks: 0,
+      completedTasks: 0,
+      subProjectCount: directSubProjects.length,
+    };
+
+    const subProjectsWithStats = attachRollupStats(directSubProjects, rollupMap);
+
+    res.json({
+      ...project,
+      totalTasks: projectStats.totalTasks,
+      completedTasks: projectStats.completedTasks,
+      subProjectCount: projectStats.subProjectCount,
+      parentChain,
+      subProjects: subProjectsWithStats,
+      tasks,
+    });
+  } catch (err) {
+    sendServerError(res, err);
   }
-
-  // Create stats lookup map
-  const statsByProject = Object.fromEntries(
-    stats.filter((s) => s._id != null).map((s) => [s._id.toString(), { totalTasks: s.total, completedTasks: s.completed }])
-  );
-
-  // Calculate stats for main project
-  const descendantIds = getAllDescendantIds(project._id, allProjects);
-  const allIds = [project._id, ...descendantIds];
-
-  let totalTasks = 0;
-  let completedTasks = 0;
-  for (const id of allIds) {
-    const s = statsByProject[id.toString()];
-    if (s) {
-      totalTasks += s.totalTasks;
-      completedTasks += s.completedTasks;
-    }
-  }
-
-  // Add stats to sub-projects (only calculate for direct children)
-  const subProjectsWithStats = directSubProjects.map((sp) => {
-    const spDescendantIds = getAllDescendantIds(sp._id, allProjects);
-    const spAllIds = [sp._id, ...spDescendantIds];
-    let spTotal = 0;
-    let spCompleted = 0;
-    for (const id of spAllIds) {
-      const s = statsByProject[id.toString()];
-      if (s) {
-        spTotal += s.totalTasks;
-        spCompleted += s.completedTasks;
-      }
-    }
-    const subSubCount = allProjects.filter((p) => p.parentId?.toString() === sp._id.toString()).length;
-    return { ...sp, totalTasks: spTotal, completedTasks: spCompleted, subProjectCount: subSubCount };
-  });
-
-  res.json({
-    ...project,
-    totalTasks,
-    completedTasks,
-    parentChain,
-    subProjects: subProjectsWithStats,
-  });
 });
 
 router.post(
@@ -193,7 +144,6 @@ router.post(
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    // Validate parentId belongs to user if provided
     if (req.body.parentId) {
       const parentProject = await Project.findOne({ _id: req.body.parentId, userId: req.user._id });
       if (!parentProject) return res.status(404).json({ message: 'Parent project not found' });
@@ -231,27 +181,17 @@ router.put(
     const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
     if (!project) return res.status(404).json({ message: 'Project not found' });
 
-    // Validate parentId if provided and not null
     if (req.body.parentId !== undefined && req.body.parentId !== null) {
-      // Cannot set self as parent
       if (req.body.parentId === req.params.id) {
         return res.status(400).json({ message: 'Project cannot be its own parent' });
       }
       const parentProject = await Project.findOne({ _id: req.body.parentId, userId: req.user._id });
       if (!parentProject) return res.status(404).json({ message: 'Parent project not found' });
 
-      // Prevent circular reference - check if new parent is a descendant
       const allProjects = await Project.find({ userId: req.user._id }).lean();
-      const descendants = [];
-      const getDescendants = (id) => {
-        const children = allProjects.filter((p) => p.parentId?.toString() === id.toString());
-        for (const child of children) {
-          descendants.push(child._id.toString());
-          getDescendants(child._id);
-        }
-      };
-      getDescendants(req.params.id);
-      if (descendants.includes(req.body.parentId)) {
+      const childrenByParent = buildChildrenMap(allProjects);
+      const descendants = getDescendantIds(req.params.id, childrenByParent);
+      if (descendants.some((id) => id.toString() === req.body.parentId)) {
         return res.status(400).json({ message: 'Cannot set a descendant as parent (circular reference)' });
       }
     }
@@ -266,35 +206,35 @@ router.put(
 );
 
 router.delete('/:id', async (req, res) => {
-  const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
-  if (!project) return res.status(404).json({ message: 'Project not found' });
+  try {
+    const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
 
-  // Get all descendant projects to delete (cascade)
-  const allProjects = await Project.find({ userId: req.user._id }).lean();
-  const descendantIds = getAllDescendantIds(req.params.id, allProjects);
-  const allIdsToDelete = [project._id, ...descendantIds];
+    const allProjects = await Project.find({ userId: req.user._id }).lean();
+    const childrenByParent = buildChildrenMap(allProjects);
+    const descendantIds = getDescendantIds(req.params.id, childrenByParent);
+    const allIdsToDelete = [project._id, ...descendantIds];
 
-  // Delete all tasks belonging to these projects
-  await Task.deleteMany({ projectId: { $in: allIdsToDelete } });
+    await Task.deleteMany({ projectId: { $in: allIdsToDelete } });
 
-  // Remove project references from notes (don't delete notes, just disconnect them)
-  await Note.updateMany(
-    { projectIds: { $in: allIdsToDelete } },
-    { $pull: { projectIds: { $in: allIdsToDelete } } }
-  );
+    await Note.updateMany(
+      { userId: req.user._id, projectIds: { $in: allIdsToDelete } },
+      { $pull: { projectIds: { $in: allIdsToDelete } } }
+    );
 
-  await Reference.updateMany(
-    { projectIds: { $in: allIdsToDelete } },
-    { $pull: { projectIds: { $in: allIdsToDelete } } }
-  );
+    await Reference.updateMany(
+      { userId: req.user._id, projectIds: { $in: allIdsToDelete } },
+      { $pull: { projectIds: { $in: allIdsToDelete } } }
+    );
 
-  // Delete all projects (parent and descendants)
-  await Project.deleteMany({ _id: { $in: allIdsToDelete } });
+    await Project.deleteMany({ _id: { $in: allIdsToDelete } });
 
-  res.status(204).send();
+    res.status(204).send();
+  } catch (err) {
+    sendServerError(res, err);
+  }
 });
 
-// GET /api/projects/:id/notes - get notes connected to a project
 router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -303,13 +243,13 @@ router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
     const project = await Project.findOne({ _id: req.params.id, userId: req.user._id });
     if (!project) return res.status(404).json({ message: 'Project not found' });
 
-    // Get all descendant project IDs if includeSubProjects is true
     const includeSubProjects = req.query.includeSubProjects === 'true';
     let projectIds = [req.params.id];
 
     if (includeSubProjects) {
       const allProjects = await Project.find({ userId: req.user._id }).lean();
-      const descendantIds = getAllDescendantIds(req.params.id, allProjects);
+      const childrenByParent = buildChildrenMap(allProjects);
+      const descendantIds = getDescendantIds(req.params.id, childrenByParent);
       projectIds = [req.params.id, ...descendantIds];
     }
 
@@ -329,7 +269,6 @@ router.get('/:id/notes', [param('id').isMongoId()], async (req, res) => {
   }
 });
 
-// GET /api/projects/:id/references - references connected to a project
 router.get('/:id/references', [param('id').isMongoId()], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -343,7 +282,8 @@ router.get('/:id/references', [param('id').isMongoId()], async (req, res) => {
 
     if (includeSubProjects) {
       const allProjects = await Project.find({ userId: req.user._id }).lean();
-      const descendantIds = getAllDescendantIds(req.params.id, allProjects);
+      const childrenByParent = buildChildrenMap(allProjects);
+      const descendantIds = getDescendantIds(req.params.id, childrenByParent);
       projectIds = [req.params.id, ...descendantIds];
     }
 

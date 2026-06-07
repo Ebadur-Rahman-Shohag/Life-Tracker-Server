@@ -14,5 +14,6 @@ const projectSchema = new mongoose.Schema(
 
 projectSchema.index({ userId: 1, order: 1 });
 projectSchema.index({ userId: 1, parentId: 1, order: 1 });
+projectSchema.index({ userId: 1, archived: 1, parentId: 1, order: 1 });
 
 export default mongoose.model('Project', projectSchema);

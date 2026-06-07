@@ -16,6 +16,10 @@ import { sendServerError } from '../utils/apiResponse.js';
 const router = express.Router();
 router.use(protect);
 
+/** List/gallery projection — excludes heavy `blocks` payload. */
+export const NOTE_LIST_FIELDS =
+  'title category isFavorite tags projectIds archived updatedAt createdAt searchText content';
+
 function blocksBodyValidator(field = 'blocks') {
   return body(field).optional().custom((value) => {
     if (value === undefined || value === null) return true;
@@ -226,7 +230,7 @@ router.get(
     query('category').optional().trim(),
     query('archived').optional().isIn(['true', 'false']),
     query('favoriteOnly').optional().isIn(['true', 'false']),
-    query('search').optional().trim(),
+    query('search').optional().trim().isLength({ max: 200 }),
     query('projectId').optional().isMongoId(),
   ],
   async (req, res) => {
@@ -268,7 +272,10 @@ router.get(
         ];
       }
 
-      const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+      const notes = await Note.find(filter)
+        .select(NOTE_LIST_FIELDS)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .lean();
       res.json(notes);
     } catch (err) {
       sendServerError(res, err);
@@ -552,7 +559,10 @@ router.get('/by-project/:projectId', [param('projectId').isMongoId()], async (re
     if (archived !== undefined) filter.archived = archived;
     else filter.archived = false;
 
-    const notes = await Note.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    const notes = await Note.find(filter)
+      .select(NOTE_LIST_FIELDS)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
     res.json(notes);
   } catch (err) {
     sendServerError(res, err);

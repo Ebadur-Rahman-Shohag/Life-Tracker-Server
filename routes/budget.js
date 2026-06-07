@@ -1,9 +1,11 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import { body, query, validationResult } from 'express-validator';
 import { protect } from '../middleware/auth.js';
 import BudgetCategory from '../models/BudgetCategory.js';
 import Transaction from '../models/Transaction.js';
 import { sendServerError } from '../utils/apiResponse.js';
+import { seedDefaultBudgetCategories } from '../utils/seedBudgetCategories.js';
 
 const router = express.Router();
 router.use(protect);
@@ -61,7 +63,13 @@ router.get('/categories', async (req, res) => {
     if (req.query.activeOnly === 'true') {
       filter.isActive = true;
     }
-    const categories = await BudgetCategory.find(filter).sort({ type: 1, name: 1 }).lean();
+    let categories = await BudgetCategory.find(filter).sort({ type: 1, name: 1 }).lean();
+
+    if (categories.length === 0 && req.query.activeOnly === 'true' && !req.query.type) {
+      await seedDefaultBudgetCategories(req.user._id);
+      categories = await BudgetCategory.find(filter).sort({ type: 1, name: 1 }).lean();
+    }
+
     res.json(categories);
   } catch (err) {
     sendServerError(res, err);
@@ -353,62 +361,99 @@ router.get(
         endDate = dates.endDate;
       }
 
-      // Get all transactions in date range
-      const transactions = await Transaction.find({
-        userId: req.user._id,
-        date: { $gte: startDate, $lte: endDate },
-      })
-        .populate('categoryId', 'name icon color type budgetLimit')
-        .lean();
+      const userId = new mongoose.Types.ObjectId(req.user._id);
+      const categoryCollection = BudgetCategory.collection.name;
 
-      // Calculate totals
+      const [facetResult] = await Transaction.aggregate([
+        {
+          $match: {
+            userId,
+            date: { $gte: startDate, $lte: endDate },
+          },
+        },
+        {
+          $lookup: {
+            from: categoryCollection,
+            localField: 'categoryId',
+            foreignField: '_id',
+            as: 'category',
+          },
+        },
+        { $match: { category: { $ne: [] } } },
+        { $unwind: '$category' },
+        {
+          $facet: {
+            totals: [
+              {
+                $group: {
+                  _id: '$type',
+                  total: { $sum: '$amount' },
+                },
+              },
+            ],
+            byCategory: [
+              { $match: { type: 'expense' } },
+              {
+                $group: {
+                  _id: '$categoryId',
+                  categoryId: { $first: '$categoryId' },
+                  categoryName: { $first: '$category.name' },
+                  categoryIcon: { $first: '$category.icon' },
+                  categoryColor: { $first: '$category.color' },
+                  budgetLimit: { $first: '$category.budgetLimit' },
+                  total: { $sum: '$amount' },
+                },
+              },
+            ],
+            byCategoryIncome: [
+              { $match: { type: 'income' } },
+              {
+                $group: {
+                  _id: '$categoryId',
+                  categoryId: { $first: '$categoryId' },
+                  categoryName: { $first: '$category.name' },
+                  categoryIcon: { $first: '$category.icon' },
+                  categoryColor: { $first: '$category.color' },
+                  total: { $sum: '$amount' },
+                },
+              },
+            ],
+          },
+        },
+      ]);
+
+      const { totals = [], byCategory = [], byCategoryIncome = [] } = facetResult || {};
+
       let totalIncome = 0;
       let totalExpenses = 0;
-      const byCategory = {};
-      const byCategoryIncome = {};
+      for (const row of totals) {
+        if (row._id === 'income') totalIncome = row.total;
+        if (row._id === 'expense') totalExpenses = row.total;
+      }
 
-      transactions.forEach((t) => {
-        // Skip transactions with deleted/missing categories
-        if (!t.categoryId) return;
-
-        if (t.type === 'income') {
-          totalIncome += t.amount;
-          const catId = t.categoryId._id.toString();
-          if (!byCategoryIncome[catId]) {
-            byCategoryIncome[catId] = {
-              categoryId: catId,
-              categoryName: t.categoryId.name,
-              categoryIcon: t.categoryId.icon,
-              categoryColor: t.categoryId.color,
-              total: 0,
-            };
-          }
-          byCategoryIncome[catId].total += t.amount;
-        } else {
-          totalExpenses += t.amount;
-          const catId = t.categoryId._id.toString();
-          if (!byCategory[catId]) {
-            byCategory[catId] = {
-              categoryId: catId,
-              categoryName: t.categoryId.name,
-              categoryIcon: t.categoryId.icon,
-              categoryColor: t.categoryId.color,
-              budgetLimit: t.categoryId.budgetLimit,
-              total: 0,
-            };
-          }
-          byCategory[catId].total += t.amount;
+      const expenseByCategory = byCategory.map((cat) => {
+        const entry = {
+          categoryId: cat.categoryId.toString(),
+          categoryName: cat.categoryName,
+          categoryIcon: cat.categoryIcon,
+          categoryColor: cat.categoryColor,
+          budgetLimit: cat.budgetLimit,
+          total: cat.total,
+          percentage: 0,
+        };
+        if (entry.budgetLimit && entry.budgetLimit > 0) {
+          entry.percentage = Math.round((entry.total / entry.budgetLimit) * 100);
         }
+        return entry;
       });
 
-      // Calculate percentages for expenses
-      Object.values(byCategory).forEach((cat) => {
-        if (cat.budgetLimit && cat.budgetLimit > 0) {
-          cat.percentage = Math.round((cat.total / cat.budgetLimit) * 100);
-        } else {
-          cat.percentage = 0;
-        }
-      });
+      const incomeByCategory = byCategoryIncome.map((cat) => ({
+        categoryId: cat.categoryId.toString(),
+        categoryName: cat.categoryName,
+        categoryIcon: cat.categoryIcon,
+        categoryColor: cat.categoryColor,
+        total: cat.total,
+      }));
 
       const net = totalIncome - totalExpenses;
 
@@ -419,8 +464,8 @@ router.get(
         totalIncome,
         totalExpenses,
         net,
-        byCategory: Object.values(byCategory),
-        byCategoryIncome: Object.values(byCategoryIncome),
+        byCategory: expenseByCategory,
+        byCategoryIncome: incomeByCategory,
       });
     } catch (err) {
       sendServerError(res, err);

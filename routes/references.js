@@ -4,6 +4,7 @@ import { protect } from '../middleware/auth.js';
 import Reference from '../models/Reference.js';
 import Project from '../models/Project.js';
 import { sendServerError } from '../utils/apiResponse.js';
+import { escapeRegexString } from '../utils/regex.js';
 
 const router = express.Router();
 router.use(protect);
@@ -25,7 +26,17 @@ function parseBool(v) {
 
 function normalizeTags(input) {
   if (!Array.isArray(input)) return [];
-  return input.map((t) => String(t).trim()).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for (const t of input) {
+    const s = String(t).trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
 }
 
 // GET / — list
@@ -54,12 +65,19 @@ router.get(
       }
       const q = req.query.q?.trim();
       if (q) {
-        const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        filter.$or = [{ title: rx }, { description: rx }];
+        const safe = escapeRegexString(q);
+        const rx = new RegExp(safe, 'i');
+        filter.$or = [
+          { title: rx },
+          { description: rx },
+          { url: rx },
+          { tags: { $elemMatch: { $regex: safe, $options: 'i' } } },
+        ];
       }
       const tag = req.query.tag?.trim();
       if (tag) {
-        filter.tags = tag;
+        const safe = escapeRegexString(tag);
+        filter.tags = { $elemMatch: { $regex: safe, $options: 'i' } };
       }
       const fav = parseBool(req.query.favorite);
       if (fav === true) filter.isFavorite = true;
@@ -131,10 +149,10 @@ router.post(
         }
       }),
     body('description').optional().isString().isLength({ max: 20000 }),
-    body('tags').optional().isArray(),
-    body('tags.*').optional().trim().isLength({ max: 64 }),
+    body('tags').optional().isArray({ max: 50 }),
+    body('tags.*').optional().isString().trim().isLength({ max: 64 }),
     body('isFavorite').optional().isBoolean(),
-    body('projectIds').optional().isArray(),
+    body('projectIds').optional().isArray({ max: 50 }),
     body('projectIds.*').optional().isMongoId(),
   ],
   async (req, res) => {
@@ -192,10 +210,10 @@ router.put(
         }
       }),
     body('description').optional().isString().isLength({ max: 20000 }),
-    body('tags').optional().isArray(),
-    body('tags.*').optional().trim().isLength({ max: 64 }),
+    body('tags').optional().isArray({ max: 50 }),
+    body('tags.*').optional().isString().trim().isLength({ max: 64 }),
     body('isFavorite').optional().isBoolean(),
-    body('projectIds').optional().isArray(),
+    body('projectIds').optional().isArray({ max: 50 }),
     body('projectIds.*').optional().isMongoId(),
   ],
   async (req, res) => {
@@ -242,9 +260,8 @@ router.delete(
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      const ref = await Reference.findOne({ _id: req.params.id, userId: req.user._id });
-      if (!ref) return res.status(404).json({ message: 'Reference not found' });
-      await Reference.findByIdAndDelete(req.params.id);
+      const result = await Reference.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+      if (!result) return res.status(404).json({ message: 'Reference not found' });
       res.status(204).send();
     } catch (err) {
       sendServerError(res, err);

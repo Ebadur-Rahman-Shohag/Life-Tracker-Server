@@ -18,5 +18,8 @@ const taskSchema = new mongoose.Schema(
 
 taskSchema.index({ userId: 1, date: 1 });
 taskSchema.index({ userId: 1, projectId: 1 });
+taskSchema.index({ userId: 1, projectId: 1, order: 1 });
+taskSchema.index({ userId: 1, date: 1, order: 1 });
+taskSchema.index({ userId: 1, recurrenceRule: 1, order: 1 });
 
 export default mongoose.model('Task', taskSchema);
