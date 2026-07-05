@@ -194,6 +194,55 @@ router.post(
   }
 );
 
+router.post(
+  '/:id/toggle',
+  [body('date').optional().isISO8601()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+
+    if (task.recurrenceRule) {
+      if (!req.body.date) {
+        return res.status(400).json({ message: 'date is required for recurring tasks' });
+      }
+      const dayStart = new Date(req.body.date);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+
+      const existing = await TaskCompletion.exists({
+        userId: req.user._id,
+        taskId: task._id,
+        date: { $gte: dayStart, $lt: dayEnd },
+      });
+
+      if (existing) {
+        await TaskCompletion.deleteOne({ userId: req.user._id, taskId: task._id, date: dayStart });
+      } else {
+        await TaskCompletion.findOneAndUpdate(
+          { userId: req.user._id, taskId: task._id, date: dayStart },
+          { userId: req.user._id, taskId: task._id, date: dayStart },
+          { upsert: true, new: true }
+        );
+      }
+
+      const completed = await TaskCompletion.exists({
+        userId: req.user._id,
+        taskId: task._id,
+        date: { $gte: dayStart, $lt: dayEnd },
+      });
+      return res.json({ ...task.toObject(), completed: !!completed, completedForToday: !!completed });
+    }
+
+    task.completed = !task.completed;
+    await task.save();
+    res.json(task);
+  }
+);
+
 router.put(
   '/:id',
   [
